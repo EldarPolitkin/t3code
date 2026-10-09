@@ -214,39 +214,60 @@ describe("threadHistoryPaging", () => {
     // (notificationTurnItem rewrites the run's user_message), so a thread woken
     // by them has few user messages. Without counting these turns the window
     // reached back to the first user turn and loaded the whole thread.
+    // A notification steered into a running turn is not a turn start.
+    const inRun = (row: OrchestrationV2ProjectedTurnItem, turn: number) =>
+      ({
+        ...row,
+        item: { ...row.item, runId: RunId.make(`run-${turn}`) },
+      }) as OrchestrationV2ProjectedTurnItem;
+    const notification = (index: number, turn: number) => {
+      const row = makeRow(index);
+      return inRun(
+        {
+          ...row,
+          item: {
+            ...row.item,
+            type: "notification",
+            source: { kind: "monitor" },
+            outcome: "completed",
+            summary: `Wake ${turn}`,
+          },
+        } as OrchestrationV2ProjectedTurnItem,
+        turn,
+      );
+    };
     const items = Array.from({ length: 161 }, (_, turn) => {
-      const row = makeRow(turn * 2);
+      const row = makeRow(turn * 4);
       if (row.item.type !== "command_execution") throw new Error("Expected command fixture");
-      const start: OrchestrationV2ProjectedTurnItem =
+      const start =
         turn === 0
-          ? {
-              ...row,
-              item: {
-                ...row.item,
-                type: "user_message",
-                createdBy: "user",
-                creationSource: "web",
-                inputIntent: "turn_start",
-                messageId: MessageId.make(`prompt-${turn}`),
-                text: `Prompt ${turn}`,
-                attachments: [],
+          ? inRun(
+              {
+                ...row,
+                item: {
+                  ...row.item,
+                  type: "user_message",
+                  createdBy: "user",
+                  creationSource: "web",
+                  inputIntent: "turn_start",
+                  messageId: MessageId.make(`prompt-${turn}`),
+                  text: `Prompt ${turn}`,
+                  attachments: [],
+                },
               },
-            }
-          : ({
-              ...row,
-              item: {
-                ...row.item,
-                type: "notification",
-                source: { kind: "monitor" },
-                outcome: "completed",
-                summary: `Wake ${turn}`,
-              },
-            } as OrchestrationV2ProjectedTurnItem);
-      return [start, makeRow(turn * 2 + 1)];
+              turn,
+            )
+          : notification(turn * 4, turn);
+      return [
+        start,
+        inRun(makeRow(turn * 4 + 1), turn),
+        notification(turn * 4 + 2, turn),
+        inRun(makeRow(turn * 4 + 3), turn),
+      ];
     }).flat();
     const first = selectRecentTimelineWindow({ items, snapshotSequence: 1 });
-    expect(first.items).toHaveLength(300);
-    expect(first.items[0]?.item.type).toBe("notification");
+    expect(first.items).toHaveLength(150 * 4);
+    expect(first.items[0]?.sourceItemId).toBe(`item-${11 * 4}`);
     const older = selectHistoryPageFromCursor({
       items,
       cursor: first.nextCursor!,

@@ -732,6 +732,7 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
       const itemRow = (input: {
         readonly ordinal: number;
         readonly runId: string;
+        readonly nodeId?: string;
         readonly item: Record<string, unknown>;
       }) => {
         const id = `turn-item:notification-turn-pages:${input.ordinal}`;
@@ -740,7 +741,7 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
           id,
           threadId,
           runId: input.runId,
-          nodeId: null,
+          nodeId: input.nodeId ?? null,
           providerThreadId: null,
           providerTurnId: null,
           nativeItemRef: null,
@@ -757,7 +758,7 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
           turn_item_id: id,
           thread_id: threadId,
           run_id: input.runId,
-          node_id: null,
+          node_id: input.nodeId ?? null,
           provider_thread_id: null,
           provider_turn_id: null,
           parent_item_id: null,
@@ -813,8 +814,20 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
                 outcome: "completed",
                 summary: `Wake ${run}`,
               };
+        // A wake steered into the running turn sits on another node and is no turn start.
+        const steered = {
+          type: "notification",
+          source: { kind: "monitor" },
+          outcome: "completed",
+          summary: `Steer ${run}`,
+        };
         const rows = [
-          itemRow({ ordinal: (ordinal += 1), runId, item: start }),
+          itemRow({
+            ordinal: (ordinal += 1),
+            runId,
+            nodeId: `node:notification-turn-pages:${run}`,
+            item: start,
+          }),
           itemRow({
             ordinal: (ordinal += 1),
             runId,
@@ -823,7 +836,8 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
           itemRow({
             ordinal: (ordinal += 1),
             runId,
-            item: { type: "command_execution", input: "command", output: "y", exitCode: 0 },
+            nodeId: `node:notification-turn-pages:${run}:steer`,
+            item: steered,
           }),
         ];
         yield* sql`INSERT INTO orchestration_v2_projection_turn_items ${sql.insert(rows)}`;
@@ -833,8 +847,8 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
       const initial = yield* projectionStore
         .getThreadSnapshotWindow(threadId, { rowLimit: 77, userTurnLimit: 10 })
         .pipe(Effect.withTracer(tracer));
-      // Wake anchors must come from the newest runs, each found by run ID, never
-      // from a walk over every turn item in the thread.
+      // Wake anchors must come from the newest runs, each found by its root node,
+      // never from a walk over every turn item in the thread.
       const windowStatement = statements.find((statement) => statement.includes("wake_anchors"));
       assert.isDefined(windowStatement);
       const windowPlan = yield* sql.unsafe<{ readonly detail: string }>(
@@ -842,7 +856,7 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
       );
       assert.include(
         windowPlan.map((row) => row.detail),
-        "SEARCH item USING INDEX orchestration_v2_projection_turn_items_run_ordinal_idx (run_id=? AND ordinal<?)",
+        "SEARCH item USING INDEX orchestration_v2_projection_turn_items_node_ordinal_idx (node_id=? AND ordinal<?)",
       );
       // The newest 150 turns hold no user turn, so the row budget applies.
       assert.isAtMost(initial.projection.turnItems.length, 77);

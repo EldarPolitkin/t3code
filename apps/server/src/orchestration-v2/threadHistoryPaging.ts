@@ -53,6 +53,7 @@ type HistoryRow = Pick<
     readonly messageId?: string;
     readonly inputIntent?: string;
     readonly createdBy?: string;
+    readonly runId?: string | null;
   };
 };
 export type SelectTimelinePageResult<Row extends HistoryRow = OrchestrationV2ProjectedTurnItem> = {
@@ -164,13 +165,19 @@ export function decodeThreadHistoryCursor(cursor: string): ThreadHistoryCursorPa
 
 /**
  * A wake (PR watch, task completion) starts its run with the user message
- * rewritten as a notification item, so a notification counts as a turn start.
+ * rewritten as a notification item. A notification steered into a running turn
+ * follows a row of its own run, so pass the previous timeline row to tell them apart.
  */
-export function isThreadHistoryTurnStart(item: HistoryRow["item"]): boolean {
+export function isThreadHistoryTurnStart(
+  item: HistoryRow["item"],
+  previous?: HistoryRow["item"],
+): boolean {
+  if (item.type === "notification") {
+    return previous === undefined || previous.runId !== item.runId;
+  }
   return (
-    item.type === "notification" ||
-    (item.type === "user_message" &&
-      (item.inputIntent === "turn_start" || item.inputIntent === "queued_turn"))
+    item.type === "user_message" &&
+    (item.inputIntent === "turn_start" || item.inputIntent === "queued_turn")
   );
 }
 
@@ -221,7 +228,7 @@ function selectOlderTimelinePage<Row extends HistoryRow>(input: {
     selected.push(row);
     encodedBytes += rowBytes;
     if (isThreadHistoryUserTurn(row.item)) userTurns += 1;
-    if (isThreadHistoryTurnStart(row.item)) rawTurns += 1;
+    if (isThreadHistoryTurnStart(row.item, input.items[index - 1]?.item)) rawTurns += 1;
   }
   selected.reverse();
 
