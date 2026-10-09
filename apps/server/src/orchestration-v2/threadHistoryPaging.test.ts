@@ -209,6 +209,54 @@ describe("threadHistoryPaging", () => {
     );
   });
 
+  it("counts notification-started turns toward the 150-turn ceiling", () => {
+    // PR watches and task completions start their runs with a notification item
+    // (notificationTurnItem rewrites the run's user_message), so a thread woken
+    // by them has few user messages. Without counting these turns the window
+    // reached back to the first user turn and loaded the whole thread.
+    const items = Array.from({ length: 161 }, (_, turn) => {
+      const row = makeRow(turn * 2);
+      if (row.item.type !== "command_execution") throw new Error("Expected command fixture");
+      const start: OrchestrationV2ProjectedTurnItem =
+        turn === 0
+          ? {
+              ...row,
+              item: {
+                ...row.item,
+                type: "user_message",
+                createdBy: "user",
+                creationSource: "web",
+                inputIntent: "turn_start",
+                messageId: MessageId.make(`prompt-${turn}`),
+                text: `Prompt ${turn}`,
+                attachments: [],
+              },
+            }
+          : ({
+              ...row,
+              item: {
+                ...row.item,
+                type: "notification",
+                source: { kind: "monitor" },
+                outcome: "completed",
+                summary: `Wake ${turn}`,
+              },
+            } as OrchestrationV2ProjectedTurnItem);
+      return [start, makeRow(turn * 2 + 1)];
+    }).flat();
+    const first = selectRecentTimelineWindow({ items, snapshotSequence: 1 });
+    expect(first.items).toHaveLength(300);
+    expect(first.items[0]?.item.type).toBe("notification");
+    const older = selectHistoryPageFromCursor({
+      items,
+      cursor: first.nextCursor!,
+      snapshotSequence: 1,
+    });
+    expect([...older.items, ...first.items].map((row) => row.sourceItemId)).toEqual(
+      items.map((row) => row.sourceItemId),
+    );
+  });
+
   it("pages agent-only child transcripts instead of dropping their earlier activity", () => {
     const commandRows = Array.from({ length: 90 }, (_, index) => makeRow(index + 1));
     const first = makeRow(0);

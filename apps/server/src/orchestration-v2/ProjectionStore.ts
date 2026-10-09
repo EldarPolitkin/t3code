@@ -2780,12 +2780,48 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                           AND request.type = 'run_interrupt_request'
                       )
                     )
+                ), wake_anchors AS (
+                  -- A wake (PR watch, task completion) starts its run with a
+                  -- notification instead of a user message. Each run starts one
+                  -- turn, so the newest runs bound the turns that can count.
+                  SELECT item.ordinal, NULL AS payload_json
+                  FROM (
+                    SELECT run_id
+                    FROM orchestration_v2_projection_runs
+                    WHERE thread_id = ${threadId}
+                      AND ordinal <= COALESCE(
+                        (
+                          SELECT anchor_run.ordinal
+                          FROM orchestration_v2_projection_turn_items AS anchor_item
+                          JOIN orchestration_v2_projection_runs AS anchor_run
+                            ON anchor_run.run_id = anchor_item.run_id
+                          WHERE anchor_item.thread_id = ${threadId}
+                            AND anchor_item.turn_item_id = ${window.anchorItemId ?? null}
+                          LIMIT 1
+                        ),
+                        9223372036854775807
+                      )
+                    ORDER BY ordinal DESC
+                    LIMIT ${THREAD_HISTORY_MAX_RAW_TURNS + 2}
+                  ) AS recent_run
+                  -- CROSS JOIN keeps the runs outside: otherwise SQLite walks every
+                  -- turn item in the thread and rescans the runs for each one.
+                  CROSS JOIN eligible AS item ON item.run_id = recent_run.run_id
+                  WHERE item.type = 'notification'
+                    AND ${window.userTurnLimit ?? null} IS NOT NULL
                 ), turn_anchors AS (
                   SELECT ordinal, payload_json
-                  FROM eligible
-                  WHERE type = 'user_message'
-                    AND json_extract(payload_json, '$.inputIntent') IN ('turn_start', 'queued_turn')
-                    AND ${window.userTurnLimit ?? null} IS NOT NULL
+                  FROM (
+                    SELECT ordinal, payload_json
+                    FROM eligible
+                    WHERE type = 'user_message'
+                      AND json_extract(payload_json, '$.inputIntent') IN ('turn_start', 'queued_turn')
+                      AND ${window.userTurnLimit ?? null} IS NOT NULL
+                    ORDER BY ordinal DESC
+                    LIMIT ${THREAD_HISTORY_MAX_RAW_TURNS + 2}
+                  )
+                  UNION ALL
+                  SELECT ordinal, payload_json FROM wake_anchors
                   ORDER BY ordinal DESC
                   LIMIT ${THREAD_HISTORY_MAX_RAW_TURNS + 2}
                 ), user_anchors AS (

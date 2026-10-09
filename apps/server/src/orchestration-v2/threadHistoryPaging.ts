@@ -162,10 +162,15 @@ export function decodeThreadHistoryCursor(cursor: string): ThreadHistoryCursorPa
   return parsed as ThreadHistoryCursorPayload;
 }
 
+/**
+ * A wake (PR watch, task completion) starts its run with the user message
+ * rewritten as a notification item, so a notification counts as a turn start.
+ */
 export function isThreadHistoryTurnStart(item: HistoryRow["item"]): boolean {
   return (
-    item.type === "user_message" &&
-    (item.inputIntent === "turn_start" || item.inputIntent === "queued_turn")
+    item.type === "notification" ||
+    (item.type === "user_message" &&
+      (item.inputIntent === "turn_start" || item.inputIntent === "queued_turn"))
   );
 }
 
