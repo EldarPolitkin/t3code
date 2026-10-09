@@ -214,7 +214,8 @@ describe("threadHistoryPaging", () => {
     // (notificationTurnItem rewrites the run's user_message), so a thread woken
     // by them has few user messages. Without counting these turns the window
     // reached back to the first user turn and loaded the whole thread.
-    // A notification steered into a running turn is not a turn start.
+    // A row of the same run may come before the starting notification (a handoff,
+    // a subagent); a notification steered into the running turn is no turn start.
     const inRun = (row: OrchestrationV2ProjectedTurnItem, turn: number) =>
       ({
         ...row,
@@ -237,7 +238,7 @@ describe("threadHistoryPaging", () => {
       );
     };
     const items = Array.from({ length: 161 }, (_, turn) => {
-      const row = makeRow(turn * 4);
+      const row = makeRow(turn * 4 + 1);
       if (row.item.type !== "command_execution") throw new Error("Expected command fixture");
       const start =
         turn === 0
@@ -257,17 +258,18 @@ describe("threadHistoryPaging", () => {
               },
               turn,
             )
-          : notification(turn * 4, turn);
+          : notification(turn * 4 + 1, turn);
       return [
+        inRun(makeRow(turn * 4), turn),
         start,
-        inRun(makeRow(turn * 4 + 1), turn),
         notification(turn * 4 + 2, turn),
         inRun(makeRow(turn * 4 + 3), turn),
       ];
     }).flat();
     const first = selectRecentTimelineWindow({ items, snapshotSequence: 1 });
-    expect(first.items).toHaveLength(150 * 4);
-    expect(first.items[0]?.sourceItemId).toBe(`item-${11 * 4}`);
+    // 150 runs from the start of run 11; its earlier row goes to the older page.
+    expect(first.items).toHaveLength(150 * 4 - 1);
+    expect(first.items[0]?.sourceItemId).toBe(`item-${11 * 4 + 1}`);
     const older = selectHistoryPageFromCursor({
       items,
       cursor: first.nextCursor!,

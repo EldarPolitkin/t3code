@@ -689,8 +689,9 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
   it.effect("caps a SQL window by runs that a notification started", () =>
     Effect.gen(function* () {
       // A thread woken by PR watches and task completions: a few user turns, then
-      // hundreds of runs whose first item is a notification. The user-turn window
-      // reached back to the first user turn and returned every row.
+      // hundreds of runs whose first input is a notification, with a user turn every
+      // 50 runs. The user-turn window reached back to the 12th-newest user turn and
+      // returned almost every row.
       const projectionStore = yield* ProjectionStore.ProjectionStoreV2;
       const sql = yield* SqlClient.SqlClient;
       const now = yield* DateTime.now;
@@ -797,24 +798,26 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
             })}
           )
         `;
-        const start =
-          run <= userTurns
-            ? {
-                type: "user_message",
-                createdBy: "user",
-                creationSource: "web",
-                messageId: `message:notification-turn-pages:${run}`,
-                inputIntent: "turn_start",
-                text: `Turn ${run}`,
-                attachments: [],
-              }
-            : {
-                type: "notification",
-                source: { kind: "monitor" },
-                outcome: "completed",
-                summary: `Wake ${run}`,
-              };
-        // A wake steered into the running turn sits on another node and is no turn start.
+        const userRun = run <= userTurns || run % 50 === 0;
+        const start = userRun
+          ? {
+              type: "user_message",
+              createdBy: "user",
+              creationSource: "web",
+              messageId: `message:notification-turn-pages:${run}`,
+              inputIntent: "turn_start",
+              text: `Turn ${run}`,
+              attachments: [],
+            }
+          : {
+              type: "notification",
+              source: { kind: "monitor" },
+              outcome: "completed",
+              summary: `Wake ${run}`,
+            };
+        // A wake steered into the running turn is on the root node too, but follows
+        // the run's first input, so it starts no turn. A row of the run (a handoff,
+        // a subagent) may come before the first input.
         const steered = {
           type: "notification",
           source: { kind: "monitor" },
@@ -822,6 +825,11 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
           summary: `Steer ${run}`,
         };
         const rows = [
+          itemRow({
+            ordinal: (ordinal += 1),
+            runId,
+            item: { type: "command_execution", input: "command", output: "w", exitCode: 0 },
+          }),
           itemRow({
             ordinal: (ordinal += 1),
             runId,
@@ -836,7 +844,7 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
           itemRow({
             ordinal: (ordinal += 1),
             runId,
-            nodeId: `node:notification-turn-pages:${run}:steer`,
+            nodeId: `node:notification-turn-pages:${run}`,
             item: steered,
           }),
         ];
@@ -847,7 +855,7 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
       const initial = yield* projectionStore
         .getThreadSnapshotWindow(threadId, { rowLimit: 77, userTurnLimit: 10 })
         .pipe(Effect.withTracer(tracer));
-      // Wake anchors must come from the newest runs, each found by its root node,
+      // Wake anchors must come from the newest runs, each run's items found by run ID,
       // never from a walk over every turn item in the thread.
       const windowStatement = statements.find((statement) => statement.includes("wake_anchors"));
       assert.isDefined(windowStatement);
@@ -856,11 +864,16 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
       );
       assert.include(
         windowPlan.map((row) => row.detail),
-        "SEARCH item USING INDEX orchestration_v2_projection_turn_items_node_ordinal_idx (node_id=? AND ordinal<?)",
+        "SEARCH item USING INDEX orchestration_v2_projection_turn_items_run_ordinal_idx (run_id=? AND ordinal<?)",
       );
-      // The newest 150 turns hold no user turn, so the row budget applies.
-      assert.isAtMost(initial.projection.turnItems.length, 77);
-      assert.strictEqual(initial.projection.turnItems.at(-1)?.id, allIds.at(-1));
+      // The newest 152 turns are the newest 152 runs (only 3 of them user turns, short
+      // of the 12 the user-turn window needs), so the window starts at the first input
+      // of run 261.
+      const firstWindowRun = userTurns + wakes - 151;
+      assert.deepEqual(
+        initial.projection.turnItems.map((item) => String(item.id)),
+        allIds.slice((firstWindowRun - 1) * 4 + 1),
+      );
       const bounded = buildBoundedThreadProjection({
         projection: initial.projection,
         snapshotSequence: 0,
@@ -879,7 +892,7 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
           anchorThreadId: ThreadId.make(anchor.st),
         });
         // Older pages stay bounded too, instead of returning the rest of the thread.
-        assert.isAtMost(snapshot.projection.turnItems.length, 3 * 152 + 77);
+        assert.isAtMost(snapshot.projection.turnItems.length, 4 * 152 + 77);
         const page = selectHistoryPageFromCursor({
           items: snapshot.projection.visibleTurnItems,
           cursor,

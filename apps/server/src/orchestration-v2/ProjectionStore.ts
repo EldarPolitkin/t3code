@@ -82,7 +82,7 @@ import { threadHtmlRenderAttachmentIds } from "../attachmentStore.ts";
 import {
   isThreadHistoryUserTurn,
   isConversationHistoryItem,
-  isThreadHistoryTurnStart,
+  threadHistoryTurnStarts,
   THREAD_HISTORY_MAX_RAW_TURNS,
   selectHistoryPageFromCursor,
   selectRecentTimelineWindow,
@@ -2782,12 +2782,11 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                     )
                 ), wake_anchors AS (
                   -- A wake (PR watch, task completion) starts its run with a
-                  -- notification on the run's root node instead of a user message.
-                  -- Each run starts one turn, so the newest runs bound the turns
-                  -- that can count.
+                  -- notification instead of a user message. Each run starts one
+                  -- turn, so the newest runs bound the turns that can count.
                   SELECT item.ordinal, NULL AS payload_json
                   FROM (
-                    SELECT run_id, json_extract(payload_json, '$.rootNodeId') AS root_node_id
+                    SELECT run_id
                     FROM orchestration_v2_projection_runs
                     WHERE thread_id = ${threadId}
                       AND ordinal <= COALESCE(
@@ -2809,8 +2808,14 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                   -- turn item in the thread and rescans the runs for each one.
                   CROSS JOIN eligible AS item ON item.run_id = recent_run.run_id
                   WHERE item.type = 'notification'
-                    -- One steered into a running turn is not on the run's root node.
-                    AND item.node_id = recent_run.root_node_id
+                    -- One steered into a running turn follows the run's first input.
+                    AND NOT EXISTS (
+                      SELECT 1
+                      FROM orchestration_v2_projection_turn_items AS earlier
+                      WHERE earlier.run_id = item.run_id
+                        AND earlier.ordinal < item.ordinal
+                        AND earlier.type IN ('user_message', 'notification')
+                    )
                     AND ${window.userTurnLimit ?? null} IS NOT NULL
                 ), turn_anchors AS (
                   SELECT ordinal, payload_json
@@ -6603,12 +6608,11 @@ export const layerMemory: Layer.Layer<ProjectionStoreV2> = Layer.effect(
                     (row) => row.sourceItemId === options.anchorItemId,
                   ) + 1;
             const candidates = snapshot.projection.visibleTurnItems.slice(0, anchorIndex);
+            const turnStarts = threadHistoryTurnStarts(candidates.map((row) => row.item));
             const turnAnchors =
               options.userTurnLimit === undefined
                 ? []
-                : candidates.flatMap((row, index) =>
-                    isThreadHistoryTurnStart(row.item, candidates[index - 1]?.item) ? [index] : [],
-                  );
+                : candidates.flatMap((_row, index) => (turnStarts[index] ? [index] : []));
             const rawStart = turnAnchors.at(-(THREAD_HISTORY_MAX_RAW_TURNS + 2)) ?? 0;
             const anchors = turnAnchors.filter(
               (index) => index >= rawStart && isThreadHistoryUserTurn(candidates[index]!.item),
